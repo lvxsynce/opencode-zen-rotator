@@ -7,7 +7,7 @@ import httpx
 import pytest
 
 from zen_rotator.config import Settings
-from zen_rotator.gateway import clean_headers, create_app, retry_delay
+from zen_rotator.gateway import clean_headers, create_app, is_daily_free_limit, retry_delay
 
 TOKEN = 'local-test-token-' + 'x' * 32
 BODY = {'model': 'example-free', 'messages': [{'role': 'user', 'content': 'OK'}]}
@@ -40,6 +40,28 @@ async def test_429_rotates_and_sticks_to_successful_route():
         assert h['active'] == 0
         await c.post('/v1/chat/completions', json=BODY)
         assert pool.requests == [1, 2, 0]
+
+
+async def test_daily_free_message_in_success_response_rotates():
+    message = "You've used today's free messages. They reset at 8:00 AM."
+    async with gateway([
+        lambda request: httpx.Response(200, text=message),
+        reply(200),
+    ]) as (c, pool, now):
+        response = await c.post('/v1/chat/completions', json=BODY)
+        assert response.status_code == 200
+        assert response.headers['x-zen-route-index'] == '1'
+        assert pool.requests == [1, 1]
+        assert pool.rate_limits_429 == 0
+        assert pool.daily_free_limits == 1
+        assert pool.rotations_429 == 0
+
+
+def test_daily_free_message_detection_is_narrow():
+    assert is_daily_free_limit(200, b"You've used today's free messages")
+    assert is_daily_free_limit(200, b"You have used today's free messages")
+    assert not is_daily_free_limit(429, b"You've used today's free messages")
+    assert not is_daily_free_limit(200, b"The model says you've used today's free messages")
 
 
 async def test_every_route_limited_and_cooldown_does_not_hammer_upstream():

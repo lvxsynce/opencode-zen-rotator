@@ -43,13 +43,21 @@ def retry_delay(value, default, maximum):
     return max(1, min(maximum, delay))
 
 
+def is_daily_free_limit(status, body):
+    """Detect Zen's daily free-quota message, which may not use HTTP 429."""
+    if status != 200:
+        return False
+    text = body.decode("utf-8", errors="replace").lower()
+    return "you've used today's free messages" in text or "you have used today's free messages" in text
+
+
 class Pool:
     def __init__(self, settings, clients, clock):
         self.settings, self.clients, self.clock = settings, clients, clock
         self.current = 0
         self.blocked = [0.0] * len(clients)
         self.requests = [0] * len(clients)
-        self.retries = self.rotations_429 = self.rate_limits_429 = self.active = 0
+        self.retries = self.rotations_429 = self.rate_limits_429 = self.daily_free_limits = self.active = 0
 
     def order(self):
         return [(self.current + n) % len(self.clients) for n in range(len(self.clients))]
@@ -57,8 +65,11 @@ class Pool:
     def available(self, index):
         return self.blocked[index] <= self.clock()
 
-    def limited(self, index, retry_after):
-        self.rate_limits_429 += 1
+    def limited(self, index, retry_after, daily_free=False):
+        if daily_free:
+            self.daily_free_limits += 1
+        else:
+            self.rate_limits_429 += 1
         delay = retry_delay(retry_after, self.settings.cooldown, self.settings.max_cooldown)
         self.blocked[index] = max(self.blocked[index], self.clock() + delay)
         self.current = (index + 1) % len(self.clients)
@@ -66,7 +77,8 @@ class Pool:
     def health(self):
         return {"ok": True, "requests": self.requests, "current": self.current,
                 "retries": self.retries, "rotations_429": self.rotations_429,
-                "rate_limits_429": self.rate_limits_429, "active": self.active,
+                "rate_limits_429": self.rate_limits_429,
+                "daily_free_limits": self.daily_free_limits, "active": self.active,
                 "cooldown_seconds": [max(0, math.ceil(t - self.clock())) for t in self.blocked]}
 
 
@@ -141,10 +153,27 @@ def create_app(settings, client_factory=None, clock=time.monotonic):
                     previous = "transport"
                     continue
                 log.info("Zen route_index=%d status=%d", index, upstream.status_code)
-                if upstream.status_code == 429:
-                    pool.limited(index, upstream.headers.get("retry-after"))
-                    await upstream.aclose()
-                    previous = "429"
+                daily_free = False
+                if upstream.status_code == 429 or (upstream.status_code == 200 and
+                        "text/event-stream" not in upstream.headers.get("content-type", "")):
+                    if upstream.status_code == 200:
+                        try:
+                            body = await upstream.aread()
+                        finally:
+                            await upstream.aclose()
+                        if not is_daily_free_limit(200, body):
+                            response_headers = clean_headers(upstream.headers, decoded=True)
+                            response_headers["x-zen-route-index"] = str(index)
+                            return Response(body, status_code=200,
+                                            headers=response_headers)
+                        daily_free = True
+                        log.info("Zen route_index=%d daily_free_limit=true", index)
+                    else:
+                        await upstream.aread()
+                    pool.limited(index, upstream.headers.get("retry-after"), daily_free=daily_free)
+                    if not upstream.is_closed:
+                        await upstream.aclose()
+                    previous = "daily" if daily_free else "429"
                     continue
                 if upstream.is_success and pool.available(index):
                     pool.current = index
