@@ -47,8 +47,8 @@ def is_daily_free_limit(status, body):
     """Detect Zen's daily free-quota message, which may not use HTTP 429."""
     if status != 200:
         return False
-    text = body.decode("utf-8", errors="replace").lower()
-    return "you've used today's free messages" in text or "you have used today's free messages" in text
+    text = body.decode("utf-8", errors="replace").lstrip().lower()
+    return text.startswith(("you've used today's free messages", "you have used today's free messages"))
 
 
 class Pool:
