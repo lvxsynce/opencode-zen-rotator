@@ -1,0 +1,5 @@
+{
+  "routes": ["direct", "socks5://USER:PASSWORD@proxy.example:1080"],
+  "port": 18998,
+  "token": "GENERATE_LOCALLY_WITH_THE_INSTALLER"
+}
