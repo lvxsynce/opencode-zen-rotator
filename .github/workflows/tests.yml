@@ -24,3 +24,4 @@ jobs:
         with:
           node-version: '22'
       - run: node tests/test_plugin.mjs
+      - run: node tests/test_native_plugin.mjs

@@ -12,6 +12,7 @@ node_modules/
 .env
 .env.*
 config.json
+native.json
 zen-proxies.json
 auth.json
 install-state.json

@@ -335,3 +335,29 @@ def test_late_active_request_update_does_not_stop_service(fake_install, monkeypa
     with pytest.raises(ValueError, match='active requests appeared'):
         i.install(args)
     assert not any('stop' in c or 'restart' in c for c in calls)
+
+
+def test_native_install_private_keys_and_module(fake_install, monkeypatch):
+    args, home = fake_install
+    args.native = True
+    monkeypatch.setattr(i, 'keys_prompt', lambda existing=None: ['test-account-key'])
+    i.install(args)
+    state = json.loads((args.install_dir / 'install-state.json').read_text())
+    private = json.loads(Path(state['config']).read_text())
+    assert private['keys'] == ['test-account-key'] and state['native']
+    assert Path(state['config']).stat().st_mode & 0o777 == 0o600
+    plugin = (home / '.config/opencode/plugins/zen-rotation/index.ts').read_text()
+    assert 'createNativePlugin' in plugin and 'test-account-key' not in plugin
+    assert list(args.install_dir.glob('releases/*/plugin/native.mjs'))
+    assert 'zen_rotator.native' in i.unit_text(Path('/bin/python'), Path('/private'), 'user', native=True)
+
+
+def test_keys_prompt_deduplicates_and_preserves(monkeypatch):
+    responses = iter(['test-key', 'test-key', ''])
+    monkeypatch.setattr(i.getpass, 'getpass', lambda *a: next(responses))
+    assert i.keys_prompt() == ['test-key']
+    monkeypatch.setattr(i, 'ask', lambda *a: True)
+    assert i.keys_prompt(['old-test-key']) == ['old-test-key']
+    monkeypatch.setattr(i.getpass, 'getpass', lambda *a: '')
+    with pytest.raises(ValueError):
+        i.keys_prompt()

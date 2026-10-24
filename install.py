@@ -108,13 +108,13 @@ def systemd_quote(value):
     return '"' + text.replace('\\', '\\\\').replace('"', '\"').replace('%', '%%').replace('$', '$$') + '"'
 
 
-def unit_text(python, config, mode):
+def unit_text(python, config, mode, native=False):
     extra = "" if mode == "user" else "\n[Install]\nWantedBy=multi-user.target\n"
     if mode == "user":
         extra = "\n[Install]\nWantedBy=default.target\n"
     return ("# Managed by opencode-zen-rotator\n[Unit]\nDescription=OpenCode Zen free route gateway\n"
             "After=network-online.target\n\n[Service]\nType=simple\n"
-            f"ExecStart={systemd_quote(python)} -m zen_rotator --config {systemd_quote(config)}\n"
+            f"ExecStart={systemd_quote(python)} -m {'zen_rotator.native' if native else 'zen_rotator'} --config {systemd_quote(config)}\n"
             "Restart=on-failure\nRestartSec=3\nUMask=0077\nNoNewPrivileges=true\n" + extra)
 
 
@@ -201,12 +201,29 @@ def load_state(path):
     return None
 
 
+def keys_prompt(existing=None):
+    if existing and ask("Оставить текущие ключи Zen?"):
+        return existing
+    print("Добавь ключи своих аккаунтов Zen. Ввод скрыт; пустая строка завершает список.")
+    keys = []
+    while True:
+        key = getpass.getpass("Ключ Zen: ").strip()
+        if not key:
+            break
+        if key not in keys:
+            keys.append(key)
+    if not keys:
+        raise ValueError("Для native-режима нужен хотя бы один ключ Zen")
+    return keys
+
+
 def install(args):
     if not sys.platform.startswith("linux") or sys.version_info < (3, 10):
         raise ValueError("Installer needs Linux and Python 3.10 or newer")
     base = args.install_dir.expanduser().resolve()
     state_path = base / "install-state.json"
     old = load_state(state_path)
+    native = getattr(args, "native", False)
     if old and not ask("Установка уже есть. Обновить её?"):
         return
     binary = find_opencode(args.opencode or (old or {}).get("opencode"))
@@ -225,9 +242,16 @@ def install(args):
         settings = Settings(tuple(content["routes"]), (existing or {}).get("token") or secrets.token_urlsafe(32), port)
     else:
         settings = settings_prompt(port, existing)
+    keys = None
+    if native:
+        if port == 65535 or not free_port(port + 1) and not (old and old["port"] == port):
+            raise ValueError("Tunnel port is in use; choose another gateway port")
+        if any(r != "direct" and not r.startswith(("socks5://", "socks5h://")) for r in settings.routes):
+            raise ValueError("Native-режим поддерживает direct и SOCKS5/SOCKS5h")
+        keys = keys_prompt((existing or {}).get("keys"))
     if old:
         info = health(old["port"])
-        if info and info.get("active", 0):
+        if info and (info.get("active", 0) or info.get("active_tunnels", 0)):
             raise ValueError("Есть активные запросы. Дождись их завершения и запусти установщик ещё раз")
     if not free_port(port) and not (old and old["port"] == port and health(port)):
         raise ValueError("Port is in use; choose another port")
@@ -269,18 +293,27 @@ def install(args):
             transaction.write(package / relative, (ROOT / relative).read_bytes(), 0o644)
         print("Устанавливаю зависимости…")
         run([str(venv / "bin/python"), "-m", "pip", "install", str(package)])
-        transaction.write(config, (json.dumps({"routes": list(settings.routes), "token": settings.token, "port": settings.port}, indent=2) + "\n").encode())
-        template = (ROOT / "plugin/index.ts.in").read_text()
-        text = template.replace("__BASE_URL__", json.dumps(f"http://127.0.0.1:{port}/v1")).replace("__LOCAL_TOKEN__", json.dumps(settings.token))
+        private_config = {"routes": list(settings.routes), "token": settings.token, "port": settings.port}
+        if native:
+            private_config["keys"] = keys
+        transaction.write(config, (json.dumps(private_config, indent=2) + "\n").encode())
+        if native:
+            module = release / "plugin/native.mjs"
+            transaction.write(module, (ROOT / "plugin/native.mjs").read_bytes(), 0o644)
+            text = "import {createNativePlugin} from " + json.dumps(str(module)) + ";\nexport default createNativePlugin(" + json.dumps(str(config)) + ");\n"
+        else:
+            template = (ROOT / "plugin/index.ts.in").read_text()
+            text = template.replace("__BASE_URL__", json.dumps(f"http://127.0.0.1:{port}/v1")).replace("__LOCAL_TOKEN__", json.dumps(settings.token))
         transaction.write(plugin, text.encode())
         transaction.write(launcher, launcher_text(binary).encode(), 0o755)
         if new_alias is not None:
             transaction.write(rc, new_alias.encode(), rc.stat().st_mode & 0o777 if rc.exists() else 0o644)
         if use_service:
-            transaction.write(unit, unit_text(venv / "bin/python", config, mode).encode(), 0o644)
+            transaction.write(unit, unit_text(venv / "bin/python", config, mode, native=native).encode(), 0o644)
             systemctl(mode, "daemon-reload")
             if old:
-                if (health(old["port"]) or {}).get("active", 0):
+                info = health(old["port"]) or {}
+                if info.get("active", 0) or info.get("active_tunnels", 0):
                     raise ValueError("New active requests appeared; update cancelled")
                 service_touched = True
                 systemctl(mode, "restart", unit.name)
@@ -299,7 +332,7 @@ def install(args):
                 files[record["path"]]["sha256"] = record["sha256"]
             else:
                 files[record["path"]] = record
-        state = {"files": list(files.values()), "port": port, "service": use_service, "mode": mode, "unit": str(unit), "opencode": str(binary), "config": str(config), "alias_rc": str(rc) if new_alias is not None else (old or {}).get("alias_rc")}
+        state = {"files": list(files.values()), "port": port, "native": native, "service": use_service, "mode": mode, "unit": str(unit), "opencode": str(binary), "config": str(config), "alias_rc": str(rc) if new_alias is not None else (old or {}).get("alias_rc")}
         atomic_write(state_path, json.dumps(state, indent=2).encode())
     except BaseException:
         if service_touched:
@@ -322,7 +355,7 @@ def install(args):
     if add_alias:
         print("Открой новый терминал или выполни: source " + shlex.quote(str(rc)))
     if not use_service:
-        print("Запусти gateway: " + shlex.join([str(venv / "bin/python"), "-m", "zen_rotator", "--config", str(config)]))
+        print("Запусти gateway: " + shlex.join([str(venv / "bin/python"), "-m", "zen_rotator.native" if native else "zen_rotator", "--config", str(config)]))
     if ask("Проверить через opencode run?", False):
         subprocess.run([str(launcher), "run", "--model", "opencode/deepseek-v4.1-flash-free", "Reply only with OK."], timeout=120, check=True)
 
@@ -348,7 +381,7 @@ def uninstall(args):
     if not state:
         raise ValueError("Installation not found")
     info = health(state["port"])
-    if info and info.get("active", 0):
+    if info and (info.get("active", 0) or info.get("active_tunnels", 0)):
         raise ValueError("Есть активные запросы. Дождись завершения")
     if not ask("Удалить компоненты этой установки?", False):
         return
@@ -391,6 +424,8 @@ def main():
     parser.add_argument("--install-dir", type=Path, default=Path(os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local/share"))) / "opencode-zen-rotator")
     parser.add_argument("--opencode")
     parser.add_argument("--routes-file", type=Path, help="Read private routes locally instead of typing them")
+    parser.set_defaults(native=True)
+    parser.add_argument("--legacy-http", dest="native", action="store_false", help="Legacy HTTP relay (not verified for current Zen)")
     args = parser.parse_args()
     try:
         if args.action == "update" and not (args.install_dir / "install-state.json").exists():

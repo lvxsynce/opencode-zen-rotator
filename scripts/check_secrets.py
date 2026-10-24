@@ -8,12 +8,13 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 SKIP = {'.git', '.venv', '__pycache__', '.pytest_cache', 'node_modules', 'build', 'dist', 'htmlcov'}
 RULES = [
+    re.compile(r'oc_sk_[A-Za-z0-9_-]{20,}'),
     re.compile(r'gh[pousr]_[A-Za-z0-9]{30,}'),
     re.compile(r'github_pat_[A-Za-z0-9_]{30,}'),
     re.compile(r'-----BEGIN (?:RSA |OPENSSH |EC )?PRIVATE KEY-----'),
     re.compile(r'(?i)(?:socks5h?|https?)://[^/\s:@]+:([^@/\s]+)@'),
 ]
-FORBIDDEN = {'config.json', 'zen-proxies.json', 'auth.json', '.env', 'install-state.json', 'opencode.json', 'opencode.jsonc'}
+FORBIDDEN = {'config.json', 'native.json', 'zen-proxies.json', 'auth.json', '.env', 'install-state.json', 'opencode.json', 'opencode.jsonc'}
 
 
 def scan():
