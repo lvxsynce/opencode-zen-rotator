@@ -36,7 +36,10 @@ export function createNativePlugin(configPath) {
           const headers = new Headers(original.headers);
           headers.set("authorization", `Bearer ${config.keys[key]}`);
           for (const name of ["x-api-key", "x-org-id", "x-opencode-org-id", "host", "content-length", "proxy-authorization"]) headers.delete(name);
-          const proxy = `http://${route}:${encodeURIComponent(config.token)}@127.0.0.1:${plan.tunnel_port}`;
+          const proxyURL = new URL(`http://127.0.0.1:${plan.tunnel_port}`);
+          proxyURL.username = String(route);
+          proxyURL.password = config.token;
+          const proxy = proxyURL.toString();
           try {
             response = await fetch(original.url, {
               method: original.method, headers, body, proxy,
