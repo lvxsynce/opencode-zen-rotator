@@ -47,6 +47,20 @@ async def test_report_cooldown_and_success(tmp_path):
         assert health['cooldowns'][0]['seconds'] > 19000
 
 
+async def test_daily_free_limit_blocks_all_routes_for_same_key(tmp_path):
+    async with control(tmp_path) as (c, app, config):
+        response = await c.post('/report', json={
+            'route': 1, 'key': 0, 'status': 429, 'daily_free': True,
+        })
+        assert response.status_code == 200
+        pairs = (await c.get('/plan')).json()['pairs']
+        assert all(key != 0 for _, key in pairs)
+        health = (await c.get('/health')).json()
+        assert health['daily_free_limits'] == 1
+        assert health['rate_limits_429'] == 1
+        assert all(health['cooldowns'][route]['seconds'] > 80000 for route in range(2))
+
+
 @pytest.mark.parametrize('status', [401, 403, 0])
 async def test_bad_key_or_transport_cooldown(tmp_path, status):
     async with control(tmp_path) as (c, app, config):

@@ -58,6 +58,35 @@ try {
     assert.equal(failedResponse.response.status, status);
     assert.equal(upstream.length, 2);
   }
+  upstream = []; reports.length = 0;
+  let quotaAttempts = 0;
+  globalThis.fetch = async (url, options) => {
+    if (url.endsWith('/plan')) return Response.json({ pairs: [[0, 0], [1, 1]], tunnel_port: 19001 });
+    if (url.endsWith('/report')) { reports.push(JSON.parse(options.body)); return Response.json({ ok: true }); }
+    quotaAttempts++;
+    return quotaAttempts === 1
+      ? new Response("You've used today's free messages. They reset at 8:17 PM.", { status: 200, headers: { 'content-type': 'text/plain' } })
+      : Response.json({ choices: [{ message: { content: 'OK after rotation' } }] });
+  };
+  const quotaEvent = event();
+  await hooks['http.request'](quotaEvent);
+  const quotaResponse = { ...quotaEvent, response: new Response(null, { status: 204 }) };
+  await hooks['http.response'](quotaResponse);
+  assert.equal(quotaAttempts, 2);
+  assert.equal(reports[0].daily_free, true);
+  assert.equal(reports[0].status, 429);
+  assert.equal((await quotaResponse.response.json()).choices[0].message.content, 'OK after rotation');
+
+  upstream = []; reports.length = 0;
+  globalThis.fetch = async (url, options) => {
+    if (url.endsWith('/plan')) return Response.json({ pairs: [[0, 0], [1, 1]], tunnel_port: 19001 });
+    if (url.endsWith('/report')) { reports.push(JSON.parse(options.body)); return Response.json({ ok: true }); }
+    return new Response("You've used today's free messages as an example.", { status: 200, headers: { 'content-type': 'text/event-stream' } });
+  };
+  const stream = event();
+  await hooks['http.request'](stream);
+  assert.equal(reports.length, 1);
+  assert.equal(reports[0].daily_free, false);
   const mockFetch = globalThis.fetch;
   globalThis.fetch = async (url, options) => {
     if (url.startsWith('https://')) throw new TypeError('Test connection failure');

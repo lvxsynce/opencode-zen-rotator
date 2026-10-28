@@ -71,7 +71,7 @@ def create_native_app(config_path):
             raise ValueError("Native tunnels require SOCKS5 routes")
     blocked = {}
     state = {"current": [len(routes) - 1, 0], "requests": 0, "rotations_429": 0,
-             "rate_limits_429": 0, "active_tunnels": 0, "successes": 0,
+             "rate_limits_429": 0, "daily_free_limits": 0, "active_tunnels": 0, "successes": 0,
              "transport_errors": 0}
     tasks = set()
 
@@ -186,7 +186,13 @@ def create_native_app(config_path):
             state["rotations_429"] += 1
         if status == 429:
             state["rate_limits_429"] += 1
-            blocked[r, k] = time.monotonic() + retry_delay(data.get("retry_after"), 60, 86400)
+            if data.get("daily_free") is True:
+                state["daily_free_limits"] += 1
+                until = time.monotonic() + retry_delay(data.get("retry_after"), 86400, 86400)
+                for ri in range(len(routes)):
+                    blocked[ri, k] = max(blocked.get((ri, k), 0), until)
+            else:
+                blocked[r, k] = time.monotonic() + retry_delay(data.get("retry_after"), 60, 86400)
         elif status in {401, 403}:
             for ri in range(len(routes)):
                 blocked[ri, k] = time.monotonic() + 60

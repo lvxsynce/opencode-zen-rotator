@@ -30,7 +30,7 @@ export function createNativePlugin(configPath) {
         const body = await original.clone().arrayBuffer();
         let response;
         let lastFailure = 0;
-        let previous429 = false;
+        let previousQuota = false;
         for (const [route, key] of plan.pairs) {
           if (original.signal.aborted) throw original.signal.reason;
           const headers = new Headers(original.headers);
@@ -51,23 +51,29 @@ export function createNativePlugin(configPath) {
             await call("/report", { route, key, status: 0 });
             continue;
           }
+          let dailyFreeLimit = false;
+          if (response.status === 200 && !response.headers.get("content-type")?.includes("text/event-stream")) {
+            const text = await response.clone().text();
+            dailyFreeLimit = /^\s*you(?:'ve| have) used today's free messages\b/i.test(text);
+          }
           try {
-            await call("/report", { route, key, status: response.status,
-              retry_after: response.headers.get("retry-after"), rotation: previous429 });
+            await call("/report", { route, key, status: dailyFreeLimit ? 429 : response.status,
+              retry_after: response.headers.get("retry-after"), rotation: previousQuota || response.status === 429, daily_free: dailyFreeLimit });
           } catch (error) {
             await response.body?.cancel();
             throw error;
           }
-          previous429 = response.status === 429;
-          lastFailure = response.status;
-          if (![429, 401, 403].includes(response.status)) break;
+          previousQuota = response.status === 429 || dailyFreeLimit;
+          lastFailure = dailyFreeLimit ? 429 : response.status;
+          if (![429, 401, 403].includes(response.status) && !dailyFreeLimit) break;
           await response.body?.cancel();
           response = undefined;
         }
         const status = !plan.pairs.length || lastFailure === 429 ? 429 : lastFailure || 502;
         const errorType = status === 429 ? "FreeUsageLimitError" : status === 502 ? "transport_error" : "authentication_error";
-        response ??= new Response(JSON.stringify({ error: { type: errorType, message: "All configured Zen routes/accounts unavailable; try later." } }),
-          { status, headers: { "content-type": "application/json", ...(status === 429 ? { "retry-after": "60" } : {}) } });
+        response ??= new Response(JSON.stringify({ error: { type: errorType,
+          message: lastFailure === 429 ? "All configured Zen free accounts have reached their daily limit; try again after reset." : "All configured Zen routes/accounts unavailable; try later." } }),
+          { status, headers: { "content-type": "application/json", ...(status === 429 ? { "retry-after": previousQuota ? "86400" : "60" } : {}) } });
         const placeholder = new Request(control + "/complete", { method: "POST", headers: localHeaders, signal: original.signal });
         pending.set(placeholder, response);
         event.request = placeholder;
